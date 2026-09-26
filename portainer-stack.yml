@@ -1,5 +1,6 @@
 # ============================================================
 # Portainer Stack — HalftonePro DTF Studio
+# Com Cloudflare Tunnel — sem exposição de portas externas
 # ============================================================
 
 services:
@@ -12,11 +13,11 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3001
-      - FRONTEND_URL=${FRONTEND_URL:-http://localhost}
-    ports:
-      - "3001:3001"
+      - FRONTEND_URL=${FRONTEND_URL:-http://halftone-frontend}
+    # Sem ports — acesso só pela rede interna Docker
     networks:
       - halftone-net
+      - ${TUNNEL_NETWORK:-cloudflare-tunnel}
     logging:
       driver: "json-file"
       options:
@@ -31,12 +32,12 @@ services:
         - VITE_API_URL=/api
     container_name: halftone-frontend
     restart: unless-stopped
-    ports:
-      - "3005:80"
-    depends_on:
-      - backend
+    # Sem ports — o tunnel aponta direto para halftone-frontend:80
     networks:
       - halftone-net
+      - ${TUNNEL_NETWORK:-cloudflare-tunnel}
+    depends_on:
+      - backend
     logging:
       driver: "json-file"
       options:
@@ -47,3 +48,9 @@ networks:
   halftone-net:
     driver: bridge
     name: halftone-network
+
+  # Rede externa onde o cloudflared já está rodando
+  # Troque o nome se a sua rede tiver outro nome
+  cloudflare-tunnel:
+    external: true
+    name: ${TUNNEL_NETWORK:-cloudflare-tunnel}
