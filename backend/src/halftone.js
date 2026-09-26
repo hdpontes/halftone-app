@@ -1,124 +1,196 @@
-import { createCanvas } from 'canvas';
 import sharp from 'sharp';
 
 /**
- * Professional RGB Halftone Engine for DTF printing
+ * ============================================================
+ * Professional AM Halftone Engine — Photoshop-equivalent
+ * ============================================================
  *
- * Approach: Color-halftone in RGB space
- * - Split image into R, G, B channels
- * - Apply halftone screen to each channel at classic angles (R:15° G:75° B:45°)
- * - Reconstruct full-color RGB image from screened channels
- * - Result: colored halftone dots, ready for DTF print
+ * Algorithm: Rational Tangent Screen (same as PostScript/Photoshop)
+ *   1. For each screen angle, build a tileable halftone cell using
+ *      rational tangent approximation of the requested angle.
+ *   2. Inside each cell, rank pixels by distance from dot center
+ *      (this is the "spot function" — Photoshop uses Euclidean dot).
+ *   3. For each output pixel, find which cell it belongs to,
+ *      look up the threshold for that position, compare against
+ *      the channel's ink value → dot or no dot.
+ *
+ * Spot functions supported:
+ *   round   → Euclidean distance (PS default)
+ *   ellipse → elliptical distance
+ *   square  → Chebyshev distance
+ *   diamond → Manhattan distance
+ *   line    → horizontal stripe
+ *   dot     → inverted Euclidean (highlight dots)
+ *
+ * Color model: RGB → process as R, G, B channels at classic angles
+ *   R: 105°  G: 75°  B: 90°  (PS Color Halftone defaults)
+ *   Black-and-white mode uses single channel at requested angle.
+ *
+ * Tone controls:
+ *   - blackPoint  (0–255): crush shadows
+ *   - whitePoint  (0–255): clip highlights
+ *   - brightness  (-100 to +100)
+ *   - saturation  (-100 to +100): applied before screening
+ *   - dotGain     (0–50%): Murray-Davies compensation
  */
 
-const CHANNEL_ANGLES = { r: 15, g: 75, b: 45 };
+// ---------------------------------------------------------------------------
+// Spot functions — return distance 0 (center) to 1 (edge) for point (x,y)
+// x,y are in normalised cell coords [-1, 1]
+// ---------------------------------------------------------------------------
+const SPOT_FUNCTIONS = {
+  round:   (x, y) => Math.sqrt(x * x + y * y) / Math.SQRT2,
+  ellipse: (x, y) => Math.sqrt((x * x) / 1.0 + (y * y) / 0.5) / Math.SQRT2,
+  square:  (x, y) => Math.max(Math.abs(x), Math.abs(y)),
+  diamond: (x, y) => (Math.abs(x) + Math.abs(y)) / 2,
+  line:    (x, y) => Math.abs(y),
+  dot:     (x, y) => 1 - Math.sqrt(x * x + y * y) / Math.SQRT2,
+};
 
-function applyDotGain(ink, gain) {
-  // Murray-Davies: compensates for ink spread on DTF film
-  return ink + gain * ink * (1 - ink);
-}
+// ---------------------------------------------------------------------------
+// Build threshold matrix for one screen using rational tangent method
+// Returns { matrix: Uint8Array(cellW * cellH), cellW, cellH }
+// ---------------------------------------------------------------------------
+function buildThresholdMatrix(lpi, dpi, angleDeg, spotFn) {
+  // Rational tangent: find integers p,q such that tan(angle) ≈ p/q
+  // and the cell size = dpi/lpi
+  const targetSize = dpi / lpi;           // ideal cell size in pixels
+  const angleRad   = (angleDeg % 180) * Math.PI / 180;
+  const tanA       = Math.tan(angleRad);
 
-/**
- * Apply halftone screen to a single 8-bit grayscale channel
- * Returns Uint8Array (0-255) of screened values
- */
-function screenChannel(channelData, width, height, opts) {
-  const { lpi, dpi, angle, dotShape, dotGain, minDot, maxDot } = opts;
-
-  const cellSize = dpi / lpi;
-  const halfCell = cellSize / 2;
-  const angleRad = (angle * Math.PI) / 180;
-  const cosA = Math.cos(angleRad);
-  const sinA = Math.sin(angleRad);
-
-  // Build screened output — start at 255 (white/full channel value)
-  const out = new Uint8Array(width * height).fill(255);
-
-  const diagonal = Math.ceil(Math.sqrt(width * width + height * height));
-
-  for (let u = -diagonal; u < diagonal + width; u += cellSize) {
-    for (let v = -diagonal; v < diagonal + height; v += cellSize) {
-      const cxS = u + halfCell;
-      const cyS = v + halfCell;
-
-      // Rotate cell center back to image space
-      const cx = cxS * cosA - cyS * sinA + width / 2;
-      const cy = cxS * sinA + cyS * cosA + height / 2;
-
-      const ix = Math.round(cx);
-      const iy = Math.round(cy);
-      if (ix < 0 || ix >= width || iy < 0 || iy >= height) continue;
-
-      // Channel value: 0=no ink (white bg), 255=full ink (full color)
-      const channelVal = channelData[iy * width + ix] / 255; // 0–1
-      let coverage = applyDotGain(channelVal, dotGain);
-      coverage = Math.max(minDot, Math.min(maxDot, coverage));
-
-      const maxR = halfCell * 0.95;
-      const r = maxR * Math.sqrt(coverage);
-      if (r < 0.5) continue;
-
-      // Rasterize dot into output buffer
-      const bx0 = Math.max(0, Math.floor(cx - maxR - 1));
-      const by0 = Math.max(0, Math.floor(cy - maxR - 1));
-      const bx1 = Math.min(width  - 1, Math.ceil(cx + maxR + 1));
-      const by1 = Math.min(height - 1, Math.ceil(cy + maxR + 1));
-
-      for (let py = by0; py <= by1; py++) {
-        for (let px = bx0; px <= bx1; px++) {
-          if (isInsideDot(px - cx, py - cy, r, dotShape, angleRad)) {
-            out[py * width + px] = 0; // dot present = full ink in this cell
-          }
-        }
-      }
-    }
+  // Find best rational approximation of tanA with small integers
+  let bestP = 0, bestQ = 1, bestErr = Infinity;
+  for (let q = 1; q <= 20; q++) {
+    const p = Math.round(tanA * q);
+    const err = Math.abs(tanA - p / q);
+    if (err < bestErr) { bestErr = err; bestP = p; bestQ = q; }
+    if (err < 0.001) break;
   }
 
+  // Cell dimensions in pixels (must be integers for a tileable screen)
+  const cellW = Math.max(2, Math.round(targetSize * Math.sqrt(bestQ * bestQ + bestP * bestP) / bestQ));
+  const cellH = Math.max(2, Math.round(targetSize * Math.sqrt(bestQ * bestQ + bestP * bestP) / Math.max(1, Math.abs(bestP || bestQ))));
+
+  // Clamp to reasonable sizes
+  const cW = Math.min(cellW, 64);
+  const cH = Math.min(cellH, 64);
+
+  // Build threshold matrix by ranking pixels by spot function distance
+  const n = cW * cH;
+  const coords = Array.from({ length: n }, (_, i) => {
+    const px = i % cW;
+    const py = Math.floor(i / cW);
+    // Normalise to [-1, 1] relative to cell centre, with screen rotation
+    const fx = (px / cW - 0.5) * 2;
+    const fy = (py / cH - 0.5) * 2;
+    // Rotate by screen angle
+    const rx = fx * Math.cos(angleRad) + fy * Math.sin(angleRad);
+    const ry = -fx * Math.sin(angleRad) + fy * Math.cos(angleRad);
+    return { i, dist: spotFn(rx, ry) };
+  });
+
+  coords.sort((a, b) => a.dist - b.dist);
+
+  const matrix = new Uint8Array(n);
+  coords.forEach(({ i }, rank) => {
+    matrix[i] = Math.round((rank / (n - 1)) * 255);
+  });
+
+  return { matrix, cellW: cW, cellH: cH };
+}
+
+// ---------------------------------------------------------------------------
+// Screen a single-channel Uint8Array (0=white, 255=black ink)
+// using a pre-built threshold matrix
+// ---------------------------------------------------------------------------
+function applyScreen(inkChannel, width, height, thresholdMatrix, cellW, cellH, dotGainFrac) {
+  const out = new Uint8Array(width * height);
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const ink = inkChannel[y * width + x] / 255; // 0–1
+
+      // Murray-Davies dot gain compensation
+      const gained = ink > 0
+        ? ink + dotGainFrac * ink * (1 - ink)
+        : 0;
+      const inkVal = Math.round(Math.min(1, gained) * 255);
+
+      // Find threshold from cell matrix
+      const tx = ((x % cellW) + cellW) % cellW;
+      const ty = ((y % cellH) + cellH) % cellH;
+      const threshold = thresholdMatrix[ty * cellW + tx];
+
+      out[y * width + x] = inkVal > threshold ? 255 : 0;
+    }
+  }
   return out;
 }
 
-function isInsideDot(dx, dy, r, shape, angle) {
-  // Rotate point into dot's local space
-  const cosA = Math.cos(-angle);
-  const sinA = Math.sin(-angle);
-  const lx = dx * cosA - dy * sinA;
-  const ly = dx * sinA + dy * cosA;
+// ---------------------------------------------------------------------------
+// Tone adjustments on a raw RGBA buffer
+// ---------------------------------------------------------------------------
+function applyToneAdjustments(data, width, height, opts) {
+  const { blackPoint = 0, whitePoint = 255, brightness = 0, saturation = 0 } = opts;
 
-  switch (shape) {
-    case 'square': {
-      const h = r * 0.9;
-      return Math.abs(lx) <= h && Math.abs(ly) <= h;
-    }
-    case 'diamond': {
-      const d = r * 1.2;
-      return (Math.abs(lx) + Math.abs(ly)) <= d;
-    }
-    case 'ellipse':
-      return (lx * lx) / (r * r) + (ly * ly) / ((r * 0.7) * (r * 0.7)) <= 1;
-    case 'line':
-      return Math.abs(ly) <= r * 0.35 && Math.abs(lx) <= r * 2;
-    default: // round
-      return dx * dx + dy * dy <= r * r;
+  const bpN = blackPoint / 255;
+  const wpN = whitePoint / 255;
+  const brN = brightness / 100;
+  const satScale = 1 + saturation / 100;
+
+  for (let i = 0; i < width * height; i++) {
+    let r = data[i * 4]     / 255;
+    let g = data[i * 4 + 1] / 255;
+    let b = data[i * 4 + 2] / 255;
+
+    // Saturation (via luminance-preserving scale)
+    const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    r = Math.max(0, Math.min(1, lum + (r - lum) * satScale));
+    g = Math.max(0, Math.min(1, lum + (g - lum) * satScale));
+    b = Math.max(0, Math.min(1, lum + (b - lum) * satScale));
+
+    // Brightness (additive)
+    r = Math.max(0, Math.min(1, r + brN));
+    g = Math.max(0, Math.min(1, g + brN));
+    b = Math.max(0, Math.min(1, b + brN));
+
+    // Black/white point (levels)
+    const remap = (v) => {
+      if (wpN <= bpN) return v;
+      return Math.max(0, Math.min(1, (v - bpN) / (wpN - bpN)));
+    };
+    r = remap(r); g = remap(g); b = remap(b);
+
+    data[i * 4]     = Math.round(r * 255);
+    data[i * 4 + 1] = Math.round(g * 255);
+    data[i * 4 + 2] = Math.round(b * 255);
   }
 }
 
-/**
- * Core halftone processor — RGB in, RGB halftone out
- */
+// ---------------------------------------------------------------------------
+// Main export
+// ---------------------------------------------------------------------------
 export async function processHalftone(imageBuffer, options = {}) {
   const {
-    lpi      = 65,
-    dpi      = 300,
-    dotShape = 'round',
-    dotGain  = 0.15,
-    minDot   = 0.02,
-    maxDot   = 0.98,
+    lpi         = 65,
+    dpi         = 300,
+    angle       = 45,         // used for BW; color uses fixed CMYK angles
+    dotShape    = 'round',
+    dotGain     = 15,         // percent 0–50
+    blackPoint  = 0,          // 0–255
+    whitePoint  = 255,        // 0–255
+    brightness  = 0,          // -100 to +100
+    saturation  = 0,          // -100 to +100
+    colorMode   = 'color',    // 'color' | 'bw'
   } = options;
 
-  console.log(`[halftone] ${dpi}dpi ${lpi}lpi shape=${dotShape} gain=${dotGain}`);
+  const dotGainFrac = Math.min(0.5, Math.max(0, dotGain / 100));
+  const spotFn = SPOT_FUNCTIONS[dotShape] || SPOT_FUNCTIONS.round;
 
-  // Normalize: flatten alpha over white, output raw RGB
-  const { data, info } = await sharp(imageBuffer)
+  console.log(`[halftone] lpi=${lpi} dpi=${dpi} angle=${angle} shape=${dotShape} gain=${dotGain}% mode=${colorMode}`);
+
+  // Decode image → flat RGBA over white
+  const { data: rawData, info } = await sharp(imageBuffer)
     .flatten({ background: { r: 255, g: 255, b: 255 } })
     .ensureAlpha(1)
     .raw()
@@ -126,68 +198,88 @@ export async function processHalftone(imageBuffer, options = {}) {
 
   const { width, height } = info;
   const pixels = width * height;
-  console.log(`[halftone] image ${width}x${height} px`);
+  const data = Buffer.from(rawData); // mutable copy
 
-  // Extract R, G, B channels
-  // For color halftone: each channel represents how much of that color is present
-  // We screen the INVERSE (ink) and reconstruct
-  const Rch = new Uint8Array(pixels);
-  const Gch = new Uint8Array(pixels);
-  const Bch = new Uint8Array(pixels);
+  console.log(`[halftone] ${width}x${height}px`);
 
-  for (let i = 0; i < pixels; i++) {
-    Rch[i] = data[i * 4];
-    Gch[i] = data[i * 4 + 1];
-    Bch[i] = data[i * 4 + 2];
+  // Apply tone adjustments
+  applyToneAdjustments(data, width, height, { blackPoint, whitePoint, brightness, saturation });
+
+  // Output buffer (RGBA, starts white)
+  const out = Buffer.alloc(pixels * 4, 255);
+
+  if (colorMode === 'bw') {
+    // ── Grayscale halftone ──────────────────────────────────────────
+    const { matrix, cellW, cellH } = buildThresholdMatrix(lpi, dpi, angle, spotFn);
+
+    const gray = new Uint8Array(pixels);
+    for (let i = 0; i < pixels; i++) {
+      gray[i] = Math.round(
+        0.2126 * data[i * 4] + 0.7152 * data[i * 4 + 1] + 0.0722 * data[i * 4 + 2]
+      );
+    }
+    // Invert: ink = 255 where image is dark
+    const ink = gray.map(v => 255 - v);
+    const screened = applyScreen(ink, width, height, matrix, cellW, cellH, dotGainFrac);
+
+    for (let i = 0; i < pixels; i++) {
+      const v = screened[i] > 0 ? 0 : 255; // dot=black, no dot=white
+      out[i * 4] = out[i * 4 + 1] = out[i * 4 + 2] = v;
+      out[i * 4 + 3] = 255;
+    }
+
+  } else {
+    // ── Color halftone — PS Color Halftone angles ───────────────────
+    // Photoshop Color Halftone: C=108° M=162° Y=90° K=45°
+    // In RGB equivalent:        R=105° G=75°  B=90°
+    const SCREEN_ANGLES = {
+      r: angle,              // user-chosen angle for primary
+      g: (angle + 30)  % 180,
+      b: (angle + 60)  % 180,
+    };
+
+    const screens = {
+      r: buildThresholdMatrix(lpi, dpi, SCREEN_ANGLES.r, spotFn),
+      g: buildThresholdMatrix(lpi, dpi, SCREEN_ANGLES.g, spotFn),
+      b: buildThresholdMatrix(lpi, dpi, SCREEN_ANGLES.b, spotFn),
+    };
+
+    // Extract and screen each channel independently
+    const channels = { r: new Uint8Array(pixels), g: new Uint8Array(pixels), b: new Uint8Array(pixels) };
+    for (let i = 0; i < pixels; i++) {
+      channels.r[i] = data[i * 4];
+      channels.g[i] = data[i * 4 + 1];
+      channels.b[i] = data[i * 4 + 2];
+    }
+
+    const screened = {
+      r: applyScreen(channels.r.map(v => 255 - v), width, height, screens.r.matrix, screens.r.cellW, screens.r.cellH, dotGainFrac),
+      g: applyScreen(channels.g.map(v => 255 - v), width, height, screens.g.matrix, screens.g.cellW, screens.g.cellH, dotGainFrac),
+      b: applyScreen(channels.b.map(v => 255 - v), width, height, screens.b.matrix, screens.b.cellW, screens.b.cellH, dotGainFrac),
+    };
+
+    for (let i = 0; i < pixels; i++) {
+      // Where screened channel has a dot → use original color; else → white
+      out[i * 4]     = screened.r[i] > 0 ? channels.r[i] : 255;
+      out[i * 4 + 1] = screened.g[i] > 0 ? channels.g[i] : 255;
+      out[i * 4 + 2] = screened.b[i] > 0 ? channels.b[i] : 255;
+      out[i * 4 + 3] = 255;
+    }
   }
 
-  // Invert each channel to get ink coverage (dark = more ink)
-  const Rinv = Rch.map(v => 255 - v);
-  const Ginv = Gch.map(v => 255 - v);
-  const Binv = Bch.map(v => 255 - v);
-
-  const commonOpts = { lpi, dpi, dotShape, dotGain, minDot, maxDot };
-
-  // Screen each channel independently
-  const Rs = screenChannel(Rinv, width, height, { ...commonOpts, angle: CHANNEL_ANGLES.r });
-  const Gs = screenChannel(Ginv, width, height, { ...commonOpts, angle: CHANNEL_ANGLES.g });
-  const Bs = screenChannel(Binv, width, height, { ...commonOpts, angle: CHANNEL_ANGLES.b });
-
-  // Reconstruct RGB output
-  // screened channel: 0 = dot present (ink) → output = original color
-  //                   255 = no dot (paper white) → output = 255
-  const outData = Buffer.alloc(pixels * 4);
-  for (let i = 0; i < pixels; i++) {
-    // Each screened channel tells us where dots are (0) vs paper (255)
-    // Dot presence means we print the original channel color at that spot
-    const rDot = Rs[i] === 0 ? 1 : 0;
-    const gDot = Gs[i] === 0 ? 1 : 0;
-    const bDot = Bs[i] === 0 ? 1 : 0;
-
-    // Reconstruct: dot = original channel value, no dot = 255 (white paper)
-    outData[i * 4]     = rDot ? Rch[i] : 255;
-    outData[i * 4 + 1] = gDot ? Gch[i] : 255;
-    outData[i * 4 + 2] = bDot ? Bch[i] : 255;
-    outData[i * 4 + 3] = 255;
-  }
-
-  // Encode to PNG with DPI metadata
-  const finalBuffer = await sharp(outData, { raw: { width, height, channels: 4 } })
+  const finalBuffer = await sharp(out, { raw: { width, height, channels: 4 } })
     .withMetadata({ density: dpi })
     .png({ compressionLevel: 6 })
     .toBuffer();
 
-  console.log(`[halftone] done — ${(finalBuffer.length / 1024).toFixed(0)} KB`);
+  console.log(`[halftone] output ${(finalBuffer.length / 1024).toFixed(0)} KB`);
   return { composite: finalBuffer };
 }
 
-/**
- * Fast preview — downscale → halftone at screen resolution
- */
 export async function processHalftoneThumbnail(imageBuffer, options = {}) {
   const meta = await sharp(imageBuffer).metadata();
-  const maxDim = 800;
-  const scale = Math.min(1, maxDim / Math.max(meta.width, meta.height));
+  const maxDim = 900;
+  const scale  = Math.min(1, maxDim / Math.max(meta.width, meta.height));
 
   const preview = await sharp(imageBuffer)
     .resize(Math.round(meta.width * scale), Math.round(meta.height * scale))
@@ -197,6 +289,6 @@ export async function processHalftoneThumbnail(imageBuffer, options = {}) {
   return processHalftone(preview, {
     ...options,
     dpi: 96,
-    lpi: Math.max(15, Math.round((options.lpi || 65) * scale * 0.5)),
+    lpi: Math.max(15, Math.round((options.lpi || 65) * scale * 0.6)),
   });
 }
