@@ -33,8 +33,6 @@ services:
     networks:
       - halftone-net
       - tunnel
-    depends_on:
-      - backend
     logging:
       driver: "json-file"
       options:
