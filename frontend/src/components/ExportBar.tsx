@@ -1,5 +1,5 @@
 import { motion, AnimatePresence } from 'framer-motion';
-import { Download, Loader2, CheckCircle2, FileImage } from 'lucide-react';
+import { Download, Loader2, FileImage } from 'lucide-react';
 import { useHalftoneStore } from '../store/halftone';
 
 interface Props {
@@ -11,12 +11,11 @@ export default function ExportBar({ onExport }: Props) {
 
   return (
     <div className="flex-shrink-0 border-t border-screen-400 bg-screen-800 px-4 py-3 flex items-center gap-4">
-      {/* File info */}
       <div className="flex items-center gap-2 text-xs font-mono text-screen-100 min-w-0">
         <FileImage size={13} className="flex-shrink-0 text-screen-200" />
         <span className="truncate">
           {imageInfo
-            ? `${imageInfo.width}×${imageInfo.height}px · ${options.lpi} LPI · ${options.dpi} DPI`
+            ? `${imageInfo.width}×${imageInfo.height}px · ${options.lpi} LPI · 300 DPI`
             : 'Carregando…'
           }
         </span>
@@ -24,7 +23,6 @@ export default function ExportBar({ onExport }: Props) {
 
       <div className="flex-1" />
 
-      {/* Processing indicator */}
       <AnimatePresence>
         {isProcessing && (
           <motion.div
@@ -39,7 +37,6 @@ export default function ExportBar({ onExport }: Props) {
         )}
       </AnimatePresence>
 
-      {/* Export button */}
       <div className="relative">
         <button
           onClick={onExport}
@@ -53,19 +50,12 @@ export default function ExportBar({ onExport }: Props) {
           `}
         >
           {isExporting ? (
-            <>
-              <Loader2 size={15} className="animate-spin" />
-              Exportando…
-            </>
+            <><Loader2 size={15} className="animate-spin" />Exportando…</>
           ) : (
-            <>
-              <Download size={15} />
-              Exportar 300 DPI
-            </>
+            <><Download size={15} />Exportar 300 DPI</>
           )}
         </button>
 
-        {/* Progress bar */}
         <AnimatePresence>
           {isExporting && (
             <motion.div
