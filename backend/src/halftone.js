@@ -1,4 +1,4 @@
-import { createCanvas, loadImage } from 'canvas';
+import { createCanvas } from 'canvas';
 import sharp from 'sharp';
 
 /**
@@ -7,103 +7,60 @@ import sharp from 'sharp';
  */
 
 const CHANNEL_CONFIGS = {
-  cyan:    { angle: 15,  color: [0, 188, 212] },
-  magenta: { angle: 75,  color: [233, 30, 99] },
-  yellow:  { angle: 90,  color: [255, 215, 0]  },
-  black:   { angle: 45,  color: [0, 0, 0]      },
+  cyan:    { angle: 15  },
+  magenta: { angle: 75  },
+  yellow:  { angle: 90  },
+  black:   { angle: 45  },
 };
 
-/**
- * Convert sRGB to linear light
- */
-function srgbToLinear(v) {
-  const n = v / 255;
-  return n <= 0.04045 ? n / 12.92 : Math.pow((n + 0.055) / 1.055, 2.4);
-}
-
-/**
- * Apply dot gain correction (compensates for ink spread on DTF film)
- */
 function applyDotGain(value, gain = 0.18) {
-  // Murray-Davies dot gain model
   return value + gain * value * (1 - value);
 }
 
 /**
- * Generate halftone for a single grayscale channel
+ * Generate halftone for a single grayscale channel (Uint8Array, 0=black 255=white)
+ * Returns a canvas with black dots on white background
  */
-function generateHalftonChannel(grayData, width, height, options) {
-  const {
-    lpi,
-    dpi,
-    angle,
-    dotShape = 'round',
-    dotGain = 0.18,
-    minDot = 0.03,
-    maxDot = 0.97,
-  } = options;
+function generateHalftoneChannel(grayData, width, height, options) {
+  const { lpi, dpi, angle, dotShape = 'round', dotGain = 0.18, minDot = 0.03, maxDot = 0.97 } = options;
 
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
-
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, width, height);
   ctx.fillStyle = '#000000';
 
-  // Cell size in pixels
   const cellSize = dpi / lpi;
   const halfCell = cellSize / 2;
   const angleRad = (angle * Math.PI) / 180;
   const cosA = Math.cos(angleRad);
   const sinA = Math.sin(angleRad);
-
-  // Extend scan bounds to cover rotated grid
   const diagonal = Math.ceil(Math.sqrt(width * width + height * height));
-  const startU = -diagonal;
-  const startV = -diagonal;
-  const endU = diagonal + width;
-  const endV = diagonal + height;
 
-  for (let u = startU; u < endU; u += cellSize) {
-    for (let v = startV; v < endV; v += cellSize) {
-      // Center of this screen cell in screen coords
+  for (let u = -diagonal; u < diagonal + width; u += cellSize) {
+    for (let v = -diagonal; v < diagonal + height; v += cellSize) {
       const cx_screen = u + halfCell;
       const cy_screen = v + halfCell;
-
-      // Rotate back to image coords
       const cx = cx_screen * cosA - cy_screen * sinA + width / 2;
       const cy = cx_screen * sinA + cy_screen * cosA + height / 2;
 
-      // Sample image at this position (bilinear)
       const ix = Math.round(cx);
       const iy = Math.round(cy);
-
       if (ix < 0 || ix >= width || iy < 0 || iy >= height) continue;
 
-      const idx = iy * width + ix;
-      const gray = grayData[idx] / 255; // 0=dark, 1=light
-      const ink = 1 - gray; // ink coverage
-
-      // Apply dot gain
+      const gray = grayData[iy * width + ix] / 255; // 0=dark,1=light
+      const ink = 1 - gray;
       let coverage = applyDotGain(ink, dotGain);
-
-      // Clamp to min/max dot
       coverage = Math.max(minDot, Math.min(maxDot, coverage));
-
-      // Skip empty dots
       if (coverage < minDot) continue;
 
-      // Calculate dot radius
       const maxR = halfCell * 0.95;
       const r = maxR * Math.sqrt(coverage);
 
-      // Draw dot with rotation transform
       ctx.save();
       ctx.translate(cx, cy);
       ctx.rotate(angleRad);
-
-      drawDot(ctx, dotShape, r, coverage);
-
+      drawDot(ctx, dotShape, r);
       ctx.restore();
     }
   }
@@ -111,52 +68,35 @@ function generateHalftonChannel(grayData, width, height, options) {
   return canvas;
 }
 
-function drawDot(ctx, shape, r, coverage) {
+function drawDot(ctx, shape, r) {
+  ctx.beginPath();
   switch (shape) {
-    case 'round':
-      ctx.beginPath();
-      ctx.arc(0, 0, r, 0, Math.PI * 2);
-      ctx.fill();
-      break;
-
-    case 'ellipse':
-      ctx.beginPath();
-      ctx.ellipse(0, 0, r, r * 0.75, 0, 0, Math.PI * 2);
-      ctx.fill();
-      break;
-
-    case 'square':
+    case 'square': {
       const s = r * 1.6;
-      ctx.fillRect(-s / 2, -s / 2, s, s);
+      ctx.rect(-s / 2, -s / 2, s, s);
       break;
-
-    case 'diamond': {
-      const d = r * 1.4;
-      ctx.beginPath();
-      ctx.moveTo(0, -d);
-      ctx.lineTo(d, 0);
-      ctx.lineTo(0, d);
-      ctx.lineTo(-d, 0);
+    }
+    case 'diamond':
+      ctx.moveTo(0, -r * 1.4);
+      ctx.lineTo(r * 1.4, 0);
+      ctx.lineTo(0, r * 1.4);
+      ctx.lineTo(-r * 1.4, 0);
       ctx.closePath();
-      ctx.fill();
       break;
-    }
-
-    case 'line': {
-      const lw = r * 2;
-      ctx.fillRect(-r * 2, -lw / 4, r * 4, lw / 2);
+    case 'ellipse':
+      ctx.ellipse(0, 0, r, r * 0.7, 0, 0, Math.PI * 2);
       break;
-    }
-
-    default:
-      ctx.beginPath();
+    case 'line':
+      ctx.rect(-r * 2, -r * 0.3, r * 4, r * 0.6);
+      break;
+    default: // round
       ctx.arc(0, 0, r, 0, Math.PI * 2);
-      ctx.fill();
   }
+  ctx.fill();
 }
 
 /**
- * Separate image into CMYK channels
+ * Separate sRGB image into CMYK channels using sharp (returns raw RGBA)
  */
 async function separateCMYK(imageBuffer) {
   const { data, info } = await sharp(imageBuffer)
@@ -165,7 +105,7 @@ async function separateCMYK(imageBuffer) {
     .toBuffer({ resolveWithObject: true });
 
   const { width, height } = info;
-  const pixels = data.length / 4;
+  const pixels = width * height;
 
   const C = new Uint8Array(pixels);
   const M = new Uint8Array(pixels);
@@ -173,18 +113,24 @@ async function separateCMYK(imageBuffer) {
   const K = new Uint8Array(pixels);
 
   for (let i = 0; i < pixels; i++) {
-    const r = srgbToLinear(data[i * 4]);
-    const g = srgbToLinear(data[i * 4 + 1]);
-    const b = srgbToLinear(data[i * 4 + 2]);
+    const r = data[i * 4]     / 255;
+    const g = data[i * 4 + 1] / 255;
+    const b = data[i * 4 + 2] / 255;
+    const a = data[i * 4 + 3] / 255;
 
-    const Kv = 1 - Math.max(r, g, b);
-    if (Kv >= 1) {
-      C[i] = M[i] = Y[i] = 0;
-      K[i] = 255;
+    // Composite over white for transparent pixels
+    const R = r * a + (1 - a);
+    const G = g * a + (1 - a);
+    const B = b * a + (1 - a);
+
+    const Kv = 1 - Math.max(R, G, B);
+    if (Kv >= 0.9999) {
+      C[i] = 0; M[i] = 0; Y[i] = 0; K[i] = 255;
     } else {
-      C[i] = Math.round(((1 - r - Kv) / (1 - Kv)) * 255);
-      M[i] = Math.round(((1 - g - Kv) / (1 - Kv)) * 255);
-      Y[i] = Math.round(((1 - b - Kv) / (1 - Kv)) * 255);
+      const d = 1 - Kv;
+      C[i] = Math.round(((1 - R - Kv) / d) * 255);
+      M[i] = Math.round(((1 - G - Kv) / d) * 255);
+      Y[i] = Math.round(((1 - B - Kv) / d) * 255);
       K[i] = Math.round(Kv * 255);
     }
   }
@@ -193,122 +139,107 @@ async function separateCMYK(imageBuffer) {
 }
 
 /**
- * Main halftone processing function
+ * Main composite halftone — renders CMYK dots multiplicatively onto white
  */
 export async function processHalftone(imageBuffer, options = {}) {
   const {
-    lpi = 65,
-    dpi = 300,
-    dotShape = 'round',
-    dotGain = 0.18,
-    minDot = 0.03,
-    maxDot = 0.97,
-    outputMode = 'composite', // 'composite' | 'separation'
-    channels = ['cyan', 'magenta', 'yellow', 'black'],
-    ucr = true, // Under Color Removal
-    ucAmount = 0.7,
+    lpi        = 65,
+    dpi        = 300,
+    dotShape   = 'round',
+    dotGain    = 0.18,
+    minDot     = 0.03,
+    maxDot     = 0.97,
+    channels   = ['cyan', 'magenta', 'yellow', 'black'],
+    ucr        = true,
+    ucAmount   = 0.7,
   } = options;
 
-  // Get image dimensions
+  console.log(`[halftone] ${dpi}dpi ${lpi}lpi ${dotShape} ucr=${ucr}`);
+
   const meta = await sharp(imageBuffer).metadata();
   const { width, height } = meta;
+  console.log(`[halftone] image ${width}x${height}`);
 
-  // Separate CMYK
-  const { C, M, Y, K } = await separateCMYK(imageBuffer);
+  let { C, M, Y, K } = await separateCMYK(imageBuffer);
 
-  // UCR: reduce CMY where K is strong
-  let Cf = C, Mf = M, Yf = Y, Kf = K;
+  // UCR
   if (ucr) {
     for (let i = 0; i < C.length; i++) {
-      const k = K[i] / 255;
-      const reduction = k * ucAmount * 255;
-      Cf[i] = Math.max(0, C[i] - reduction);
-      Mf[i] = Math.max(0, M[i] - reduction);
-      Yf[i] = Math.max(0, Y[i] - reduction);
-      Kf[i] = Math.min(255, K[i] + (reduction * 0.5));
+      const reduction = (K[i] / 255) * ucAmount * 255;
+      C[i] = Math.max(0, C[i] - reduction);
+      M[i] = Math.max(0, M[i] - reduction);
+      Y[i] = Math.max(0, Y[i] - reduction);
     }
   }
 
-  const channelData = { cyan: Cf, magenta: Mf, yellow: Yf, black: Kf };
-  const results = {};
+  const channelData = { cyan: C, magenta: M, yellow: Y, black: K };
 
-  // Process each channel
-  for (const ch of channels) {
-    const config = CHANNEL_CONFIGS[ch];
-    const grayData = channelData[ch];
+  // Ink colors for multiply blend (CMYK subtractive)
+  const INK_COLORS = {
+    cyan:    [0,   188, 212],
+    magenta: [233, 30,  99 ],
+    yellow:  [255, 220, 0  ],
+    black:   [20,  20,  20 ],
+  };
 
-    const canvas = generateHalftonChannel(grayData, width, height, {
-      lpi,
-      dpi,
-      angle: config.angle,
-      dotShape,
-      dotGain,
-      minDot,
-      maxDot,
-    });
-
-    results[ch] = canvas;
-  }
-
-  if (outputMode === 'separation') {
-    // Return individual channel buffers
-    const separations = {};
-    for (const ch of channels) {
-      separations[ch] = results[ch].toBuffer();
-    }
-    return separations;
-  }
-
-  // Composite mode: blend channels with multiply
-  const outputCanvas = createCanvas(width, height);
-  const outCtx = outputCanvas.getContext('2d');
-
-  // White background
+  // Output canvas — white background
+  const output = createCanvas(width, height);
+  const outCtx = output.getContext('2d');
   outCtx.fillStyle = '#ffffff';
   outCtx.fillRect(0, 0, width, height);
 
-  // Blend each channel
   for (const ch of channels) {
-    const config = CHANNEL_CONFIGS[ch];
-    const [r, g, b] = config.color;
+    const grayData = channelData[ch];
+    const dotCanvas = generateHalftoneChannel(grayData, width, height, {
+      lpi, dpi, angle: CHANNEL_CONFIGS[ch].angle,
+      dotShape, dotGain, minDot, maxDot,
+    });
 
-    // Tint the channel canvas
-    const tintCanvas = createCanvas(width, height);
-    const tintCtx = tintCanvas.getContext('2d');
+    // Tint dots with ink color
+    const tint = createCanvas(width, height);
+    const tCtx = tint.getContext('2d');
+    tCtx.drawImage(dotCanvas, 0, 0);
 
-    // Draw halftone dots
-    tintCtx.drawImage(results[ch], 0, 0);
+    // Replace black dots with ink color, keep white
+    // Use source-in won't work here; instead invert + colorize
+    const imgData = tCtx.getImageData(0, 0, width, height);
+    const [ir, ig, ib] = INK_COLORS[ch];
+    for (let i = 0; i < imgData.data.length; i += 4) {
+      const luma = imgData.data[i]; // grayscale: 0=dot, 255=paper
+      const dot = 1 - luma / 255;  // 1 where dot, 0 where paper
+      imgData.data[i]     = Math.round(255 - dot * (255 - ir));
+      imgData.data[i + 1] = Math.round(255 - dot * (255 - ig));
+      imgData.data[i + 2] = Math.round(255 - dot * (255 - ib));
+      imgData.data[i + 3] = 255;
+    }
+    tCtx.putImageData(imgData, 0, 0);
 
-    // Apply ink color via multiply blend
-    tintCtx.globalCompositeOperation = 'source-in';
-    tintCtx.fillStyle = `rgb(${r},${g},${b})`;
-    tintCtx.fillRect(0, 0, width, height);
-
-    // Multiply onto output
+    // Multiply blend onto output
     outCtx.globalCompositeOperation = 'multiply';
-    outCtx.drawImage(tintCanvas, 0, 0);
+    outCtx.drawImage(tint, 0, 0);
   }
 
-  // Convert to PNG buffer with metadata
-  const pngBuffer = outputCanvas.toBuffer('image/png');
+  // Reset composite op
+  outCtx.globalCompositeOperation = 'source-over';
 
-  // Re-embed 300dpi metadata via sharp
+  const pngBuffer = output.toBuffer('image/png');
+
+  // Embed DPI metadata
   const finalBuffer = await sharp(pngBuffer)
-    .withMetadata({
-      density: dpi,
-    })
+    .withMetadata({ density: dpi })
     .png({ compressionLevel: 6 })
     .toBuffer();
 
+  console.log(`[halftone] done, output ${finalBuffer.length} bytes`);
   return { composite: finalBuffer };
 }
 
 /**
- * Get thumbnail preview (faster, lower res)
+ * Fast preview — downscale first, then halftone
  */
 export async function processHalftoneThumbnail(imageBuffer, options = {}) {
   const meta = await sharp(imageBuffer).metadata();
-  const maxDim = 800;
+  const maxDim = 600;
   const scale = Math.min(1, maxDim / Math.max(meta.width, meta.height));
 
   const previewBuffer = await sharp(imageBuffer)
@@ -316,9 +247,11 @@ export async function processHalftoneThumbnail(imageBuffer, options = {}) {
     .png()
     .toBuffer();
 
+  const previewLpi = Math.max(20, Math.round((options.lpi || 65) * scale));
+
   return processHalftone(previewBuffer, {
     ...options,
     dpi: 72,
-    lpi: options.lpi ? Math.round(options.lpi * scale) : 35,
+    lpi: previewLpi,
   });
 }
