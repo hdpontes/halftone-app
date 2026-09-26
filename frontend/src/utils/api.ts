@@ -1,3 +1,5 @@
+/// <reference types="vite/client" />
+
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
@@ -9,9 +11,12 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   return res;
 }
 
-export async function getImageInfo(file: File): Promise<{
-  width: number; height: number; dpi: number; format: string; size: number; hasAlpha: boolean;
-}> {
+export interface ImageInfo {
+  width: number; height: number; dpi: number;
+  format: string; size: number; hasAlpha: boolean;
+}
+
+export async function getImageInfo(file: File): Promise<ImageInfo> {
   const form = new FormData();
   form.append('image', file);
   const res = await apiFetch('/image/info', { method: 'POST', body: form });
@@ -20,28 +25,19 @@ export async function getImageInfo(file: File): Promise<{
 
 export interface ApiHalftoneOptions {
   lpi: number;
-  dpi: number;
   dotShape: string;
   dotGain: number;
-  minDot: number;
-  maxDot: number;
-  ucr: boolean;
-  ucAmount: number;
-  channels: string[];
 }
 
 function buildForm(file: File, opts: ApiHalftoneOptions): FormData {
   const form = new FormData();
   form.append('image', file);
-  form.append('lpi', String(opts.lpi));
-  form.append('dpi', String(opts.dpi));
+  form.append('lpi',      String(opts.lpi));
   form.append('dotShape', opts.dotShape);
-  form.append('dotGain', String(opts.dotGain));
-  form.append('minDot', String(opts.minDot));
-  form.append('maxDot', String(opts.maxDot));
-  form.append('ucr', String(opts.ucr));
-  form.append('ucAmount', String(opts.ucAmount));
-  form.append('channels', JSON.stringify(opts.channels));
+  form.append('dotGain',  String(opts.dotGain));
+  form.append('dpi',      '300');
+  form.append('minDot',   '0.02');
+  form.append('maxDot',   '0.98');
   return form;
 }
 
@@ -55,11 +51,11 @@ export async function getHalftonePreview(file: File, opts: ApiHalftoneOptions): 
 export async function exportHalftone(
   file: File,
   opts: ApiHalftoneOptions,
-  onProgress?: (p: number) => void
+  onProgress?: (p: number) => void,
 ): Promise<Blob> {
   onProgress?.(10);
   const form = buildForm(file, opts);
-  onProgress?.(25);
+  onProgress?.(30);
   const res = await apiFetch('/halftone/export', { method: 'POST', body: form });
   onProgress?.(85);
   const blob = await res.blob();
