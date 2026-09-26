@@ -17,7 +17,7 @@ services:
     # Sem ports — acesso só pela rede interna Docker
     networks:
       - halftone-net
-      - ${TUNNEL_NETWORK}
+      - ${TUNNEL_NETWORK:automacoes_default}
     logging:
       driver: "json-file"
       options:
@@ -35,7 +35,7 @@ services:
     # Sem ports — o tunnel aponta direto para halftone-frontend:80
     networks:
       - halftone-net
-      - ${TUNNEL_NETWORK}
+      - ${TUNNEL_NETWORK:automacoes_default}
     depends_on:
       - backend
     logging:
@@ -53,4 +53,4 @@ networks:
   # Troque o nome se a sua rede tiver outro nome
   cloudflare-tunnel:
     external: true
-    name: ${TUNNEL_NETWORK}
+    name: ${TUNNEL_NETWORK:automacoes_default}
