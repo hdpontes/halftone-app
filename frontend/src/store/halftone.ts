@@ -2,14 +2,8 @@ import { create } from 'zustand';
 
 export interface HalftoneOptions {
   lpi: number;
-  dpi: number;
-  dotShape: 'round' | 'ellipse' | 'square' | 'diamond' | 'line';
+  dotShape: 'round' | 'ellipse' | 'square' | 'diamond';
   dotGain: number;
-  minDot: number;
-  maxDot: number;
-  ucr: boolean;
-  ucAmount: number;
-  channels: ('cyan' | 'magenta' | 'yellow' | 'black')[];
 }
 
 export interface ImageInfo {
@@ -45,23 +39,31 @@ interface HalftoneState {
 
 export const DEFAULT_OPTIONS: HalftoneOptions = {
   lpi: 65,
-  dpi: 300,
   dotShape: 'round',
-  dotGain: 0.18,
-  minDot: 0.03,
-  maxDot: 0.97,
-  ucr: true,
-  ucAmount: 0.7,
-  channels: ['cyan', 'magenta', 'yellow', 'black'],
+  dotGain: 0.15,
 };
 
-// Presets for different substrates
-export const PRESETS: Record<string, Partial<HalftoneOptions>> = {
-  dtf_standard: { lpi: 65, dotShape: 'round', dotGain: 0.18, ucr: true, ucAmount: 0.70 },
-  dtf_fine:     { lpi: 85, dotShape: 'round', dotGain: 0.14, ucr: true, ucAmount: 0.65 },
-  dtf_bold:     { lpi: 50, dotShape: 'square', dotGain: 0.22, ucr: true, ucAmount: 0.80 },
-  dtf_dark_garment: { lpi: 55, dotShape: 'ellipse', dotGain: 0.20, ucr: false, ucAmount: 0 },
-  newspaper:    { lpi: 85, dotShape: 'round', dotGain: 0.25, ucr: true, ucAmount: 0.60 },
+export const PRESETS: Record<string, { label: string; desc: string; options: HalftoneOptions }> = {
+  dtf_standard: {
+    label: 'DTF Padrão',
+    desc: 'Ideal para camisetas e tecidos claros',
+    options: { lpi: 65, dotShape: 'round', dotGain: 0.15 },
+  },
+  dtf_fine: {
+    label: 'DTF Fino',
+    desc: 'Alta definição para detalhes pequenos',
+    options: { lpi: 85, dotShape: 'round', dotGain: 0.10 },
+  },
+  dtf_bold: {
+    label: 'DTF Bold',
+    desc: 'Pontos maiores para tecidos escuros',
+    options: { lpi: 45, dotShape: 'round', dotGain: 0.20 },
+  },
+  dtf_textured: {
+    label: 'Texturizado',
+    desc: 'Efeito granulado artístico',
+    options: { lpi: 55, dotShape: 'ellipse', dotGain: 0.18 },
+  },
 };
 
 export const useHalftoneStore = create<HalftoneState>((set) => ({
@@ -79,8 +81,7 @@ export const useHalftoneStore = create<HalftoneState>((set) => ({
   setImageInfo: (info) => set({ imageInfo: info }),
   setPreviewUrl: (url) => set({ previewUrl: url }),
   setOriginalPreviewUrl: (url) => set({ originalPreviewUrl: url }),
-  setOption: (key, value) =>
-    set((s) => ({ options: { ...s.options, [key]: value } })),
+  setOption: (key, value) => set((s) => ({ options: { ...s.options, [key]: value } })),
   resetOptions: () => set({ options: { ...DEFAULT_OPTIONS } }),
   setProcessing: (v) => set({ isProcessing: v }),
   setExporting: (v) => set({ isExporting: v }),
